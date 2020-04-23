@@ -13,7 +13,7 @@ references:
         sudo apt-get update && sudo apt-get install -y cmake
         pip install "$TORCH_VERSION"
         pip install -r requirements.txt -q
-        sudo pip install pytest pytest-cov pytest-flake8 -q
+        #sudo pip install pytest pytest-cov pytest-flake8 -q
         pip install -r ./tests/requirements-devel.txt -q
 
   tests: &tests
@@ -22,7 +22,7 @@ references:
      command: |
        python --version ; pip --version ; pip list
        py.test pytorch_lightning tests -v --doctest-modules --junitxml=test-reports/pytest_junit.xml
-     no_output_timeout: 30m
+     no_output_timeout: 10m
 
   examples: &examples
    run:
@@ -31,7 +31,7 @@ references:
        pip install -r ./pl_examples/requirements.txt --user
        python --version ; pip --version ; pip list
        py.test pl_examples -v --doctest-modules --junitxml=test-reports/pytest_junit.xml
-     no_output_timeout: 20m
+     no_output_timeout: 15m
 
   install_pkg: &install_pkg
     run:
