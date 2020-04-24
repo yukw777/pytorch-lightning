@@ -16,7 +16,7 @@ from tests.base.datasets import PATH_DATASETS
 def assert_speed_parity(pl_times, pt_times, num_epochs):
 
     # assert speeds
-    max_diff_per_epoch = 0.65
+    max_diff_per_epoch = 0.10
     pl_times = np.asarray(pl_times)
     pt_times = np.asarray(pt_times)
     diffs = pl_times - pt_times
@@ -27,7 +27,7 @@ def assert_speed_parity(pl_times, pt_times, num_epochs):
     print('---------------------------------------')
 
     assert np.alltrue(diffs < max_diff_per_epoch), \
-        f"lightning was slower than PT (threshold {max_diff_per_epoch})"
+        f"lightning {diffs} was slower than PT (threshold {max_diff_per_epoch})"
 
 
 def run_model_test_without_loggers(trainer_options, model, min_acc=0.50):
