@@ -32,5 +32,5 @@ RUN apt-get update && apt-get install -y cmake && \
     pip install -r requirements.txt --user && \
     pip install -r requirements-extra.txt --user && \
     pip install -r requirements-tests.txt --user && \
-    rm requirements*
+    rm requirements* && \
     pip list
