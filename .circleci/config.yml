@@ -19,6 +19,8 @@ references:
   tests: &tests
    run:
      name: Testing
+     environment:
+         - PATH: "$PATH:/root/.local/bin"
      command: |
        python --version ; pip --version ; pip list
        python -m pytest pytorch_lightning tests -v --doctest-modules --junitxml=test-reports/pytest_junit.xml
