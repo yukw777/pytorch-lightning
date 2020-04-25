@@ -19,6 +19,9 @@ references:
   tests: &tests
    run:
      name: Testing
+     environment:
+       # define path dor Horovod launching
+       PATH: $PATH:/root/.local/bin/
      command: |
        python --version ; pip --version ; pip list
        python -m pytest pytorch_lightning tests -v --doctest-modules --junitxml=test-reports/pytest_junit.xml
@@ -121,8 +124,6 @@ jobs:
     docker:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.1
     environment:
-      # define path dor Horovod launching
-      - PATH: "$PATH:/root/.local/bin"
       - TORCH_VERSION: "torch>=1.1, <1.2"
     steps: *steps
 
@@ -130,8 +131,6 @@ jobs:
     docker:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.2
     environment:
-      # define path dor Horovod launching
-      - PATH: "$PATH:/root/.local/bin"
       - TORCH_VERSION: "torch>=1.2, <1.3"
     steps: *steps
 
@@ -139,8 +138,6 @@ jobs:
     docker:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.3
     environment:
-      # define path dor Horovod launching
-      - PATH: "$PATH:/root/.local/bin"
       - TORCH_VERSION: "torch>=1.3, <1.4"
     steps: *steps
 
@@ -148,8 +145,6 @@ jobs:
     docker:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.4
     environment:
-      # define path dor Horovod launching
-      - PATH: "$PATH:/root/.local/bin"
       - TORCH_VERSION: "torch>=1.4, <1.5"
     steps: *steps
 
@@ -157,8 +152,6 @@ jobs:
     docker:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.5
     environment:
-      # define path dor Horovod launching
-      - PATH: "$PATH:/root/.local/bin"
       - TORCH_VERSION: "torch>=1.5, <1.6"
     steps: *steps
 
