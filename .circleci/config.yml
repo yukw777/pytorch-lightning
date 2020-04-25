@@ -122,8 +122,6 @@ jobs:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.1
     environment:
       TORCH_VERSION: "torch>=1.1, <1.2"
-      # define path dor Horovod launching
-      PATH: $PATH:/root/.local/bin/
     steps: *steps
 
   PyTorch-v1_2:
@@ -131,8 +129,6 @@ jobs:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.2
     environment:
       TORCH_VERSION: "torch>=1.2, <1.3"
-      # define path dor Horovod launching
-      PATH: $PATH:/root/.local/bin/
     steps: *steps
 
   PyTorch-v1_3:
@@ -140,8 +136,6 @@ jobs:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.3
     environment:
       TORCH_VERSION: "torch>=1.3, <1.4"
-      # define path dor Horovod launching
-      PATH: $PATH:/root/.local/bin/
     steps: *steps
 
   PyTorch-v1_4:
@@ -149,8 +143,6 @@ jobs:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.4
     environment:
       - TORCH_VERSION: "torch>=1.4, <1.5"
-      # define path dor Horovod launching
-      - PATH: /root/.local/bin/:$PATH
     steps: *steps
 
   PyTorch-v1_5:
@@ -158,8 +150,6 @@ jobs:
       - image: pytorchlightning/pytorch_lightning:devel-pt1.5
     environment:
       TORCH_VERSION: "torch>=1.5, <1.6"
-      # define path dor Horovod launching
-      PATH: /root/.local/bin/:$PATH
     steps: *steps
 
   Examples:
