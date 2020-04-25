@@ -150,7 +150,7 @@ jobs:
     environment:
       - TORCH_VERSION: "torch>=1.4, <1.5"
       # define path dor Horovod launching
-      - PATH: $PATH:/root/.local/bin/
+      - PATH: /root/.local/bin/:$PATH
     steps: *steps
 
   PyTorch-v1_5:
@@ -159,7 +159,7 @@ jobs:
     environment:
       TORCH_VERSION: "torch>=1.5, <1.6"
       # define path dor Horovod launching
-      PATH: $PATH:/root/.local/bin/
+      PATH: /root/.local/bin/:$PATH
     steps: *steps
 
   Examples:
