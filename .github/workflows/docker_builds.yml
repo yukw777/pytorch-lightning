@@ -42,5 +42,3 @@ jobs:
         dockerfile: docker/Dockerfile
         buildargs: PYTHON_VERSION=${{ matrix.python_version }},PYTORCH_VERSION=${{ matrix.pytorch_version }},LIGHTNING_VERSION=${{ steps.get_version.outputs.VERSION }}
         tags: "latest-py${{ matrix.python_version }}-torch${{ matrix.pytorch_version }}"
-  
-
