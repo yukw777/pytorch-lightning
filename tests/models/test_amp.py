@@ -1,28 +1,26 @@
 import os
 
 import pytest
+import torch
 
 import tests.base.utils as tutils
 from pytorch_lightning import Trainer
-from pytorch_lightning.utilities.debugging import MisconfigurationException
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
 from tests.base import (
     LightningTestModel,
 )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="test requires GPU machine")
 def test_amp_single_gpu(tmpdir):
     """Make sure DDP + AMP work."""
     tutils.reset_seed()
-
-    if not tutils.can_run_gpu_test():
-        return
 
     hparams = tutils.get_default_hparams()
     model = LightningTestModel(hparams)
 
     trainer_options = dict(
         default_save_path=tmpdir,
-        show_progress_bar=True,
         max_epochs=1,
         gpus=1,
         distributed_backend='ddp',
@@ -33,19 +31,16 @@ def test_amp_single_gpu(tmpdir):
 
 
 @pytest.mark.spawn
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="test requires GPU machine")
 def test_no_amp_single_gpu(tmpdir):
     """Make sure DDP + AMP work."""
     tutils.reset_seed()
-
-    if not tutils.can_run_gpu_test():
-        return
 
     hparams = tutils.get_default_hparams()
     model = LightningTestModel(hparams)
 
     trainer_options = dict(
         default_save_path=tmpdir,
-        show_progress_bar=True,
         max_epochs=1,
         gpus=1,
         distributed_backend='dp',
@@ -58,11 +53,9 @@ def test_no_amp_single_gpu(tmpdir):
     assert result == 1
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="test requires multi-GPU machine")
 def test_amp_gpu_ddp(tmpdir):
     """Make sure DDP + AMP work."""
-    if not tutils.can_run_gpu_test():
-        return
-
     tutils.reset_seed()
     tutils.set_random_master_port()
 
@@ -71,7 +64,6 @@ def test_amp_gpu_ddp(tmpdir):
 
     trainer_options = dict(
         default_save_path=tmpdir,
-        show_progress_bar=True,
         max_epochs=1,
         gpus=2,
         distributed_backend='ddp',
@@ -82,11 +74,9 @@ def test_amp_gpu_ddp(tmpdir):
 
 
 @pytest.mark.spawn
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="test requires multi-GPU machine")
 def test_amp_gpu_ddp_slurm_managed(tmpdir):
     """Make sure DDP + AMP work."""
-    if not tutils.can_run_gpu_test():
-        return
-
     tutils.reset_seed()
 
     # simulate setting slurm flags
@@ -97,7 +87,6 @@ def test_amp_gpu_ddp_slurm_managed(tmpdir):
     model = LightningTestModel(hparams)
 
     trainer_options = dict(
-        show_progress_bar=True,
         max_epochs=1,
         gpus=[0],
         distributed_backend='ddp',
@@ -135,7 +124,7 @@ def test_cpu_model_with_amp(tmpdir):
 
     trainer_options = dict(
         default_save_path=tmpdir,
-        show_progress_bar=False,
+        progress_bar_refresh_rate=0,
         logger=tutils.get_default_testtube_logger(tmpdir),
         max_epochs=1,
         train_percent_check=0.4,
@@ -150,12 +139,10 @@ def test_cpu_model_with_amp(tmpdir):
 
 
 @pytest.mark.spawn
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="test requires multi-GPU machine")
 def test_amp_gpu_dp(tmpdir):
     """Make sure DP + AMP work."""
     tutils.reset_seed()
-
-    if not tutils.can_run_gpu_test():
-        return
 
     model, hparams = tutils.get_default_model()
     trainer_options = dict(

@@ -48,6 +48,15 @@ def test_tbd_remove_in_v0_8_0_trainer():
             'Wrongly passed deprecated argument "%s" to attribute "%s"' % (attr_old, attr_new)
 
 
+def test_tbd_remove_in_v0_9_0_trainer():
+    # test show_progress_bar set by progress_bar_refresh_rate
+    trainer = Trainer(progress_bar_refresh_rate=0, show_progress_bar=True)
+    assert not getattr(trainer, 'show_progress_bar')
+
+    trainer = Trainer(progress_bar_refresh_rate=50, show_progress_bar=False)
+    assert getattr(trainer, 'show_progress_bar')
+
+
 def test_tbd_remove_in_v0_9_0_module_imports():
     from pytorch_lightning.core.decorators import data_loader  # noqa: F811
 
@@ -57,6 +66,8 @@ def test_tbd_remove_in_v0_9_0_module_imports():
     from pytorch_lightning.logging.test_tube import TestTubeLogger  # noqa: F402
     from pytorch_lightning.logging.wandb import WandbLogger  # noqa: F402
 
+    from pytorch_lightning.profiler import SimpleProfiler, AdvancedProfiler  # noqa: F402
+
 
 class ModelVer0_6(LightTrainDataloader, LightEmptyTestStep, TestModelBase):
 
@@ -64,8 +75,14 @@ class ModelVer0_6(LightTrainDataloader, LightEmptyTestStep, TestModelBase):
     def val_dataloader(self):
         return self._dataloader(train=False)
 
+    def validation_step(self, batch, batch_idx, *args, **kwargs):
+        return {'val_loss': 0.6}
+
     def validation_end(self, outputs):
         return {'val_loss': 0.6}
+
+    def test_dataloader(self):
+        return self._dataloader(train=False)
 
     def test_end(self, outputs):
         return {'test_loss': 0.6}
@@ -77,8 +94,14 @@ class ModelVer0_7(LightTrainDataloader, LightEmptyTestStep, TestModelBase):
     def val_dataloader(self):
         return self._dataloader(train=False)
 
+    def validation_step(self, batch, batch_idx, *args, **kwargs):
+        return {'val_loss': 0.7}
+
     def validation_end(self, outputs):
         return {'val_loss': 0.7}
+
+    def test_dataloader(self):
+        return self._dataloader(train=False)
 
     def test_end(self, outputs):
         return {'test_loss': 0.7}
@@ -95,7 +118,7 @@ def test_tbd_remove_in_v1_0_0_model_hooks():
 
     trainer = Trainer(logger=False)
     # TODO: why `dataloder` is required if it is not used
-    result = trainer.evaluate(model, dataloaders=[[None]], max_batches=1)
+    result = trainer._evaluate(model, dataloaders=[[None]], max_batches=1)
     assert result == {'val_loss': 0.6}
 
     model = ModelVer0_7(hparams)
@@ -106,5 +129,5 @@ def test_tbd_remove_in_v1_0_0_model_hooks():
 
     trainer = Trainer(logger=False)
     # TODO: why `dataloder` is required if it is not used
-    result = trainer.evaluate(model, dataloaders=[[None]], max_batches=1)
+    result = trainer._evaluate(model, dataloaders=[[None]], max_batches=1)
     assert result == {'val_loss': 0.7}

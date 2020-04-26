@@ -8,7 +8,7 @@ import torch
 import tests.base.utils as tutils
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.utilities.debugging import MisconfigurationException
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
 from tests.base import (
     LightningTestModel,
     LightningTestModelWithoutHyperparametersArg,
@@ -16,10 +16,9 @@ from tests.base import (
 )
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="test requires multi-GPU machine")
 def test_running_test_pretrained_model_ddp(tmpdir):
     """Verify `test()` on pretrained model."""
-    if not tutils.can_run_gpu_test():
-        return
 
     tutils.reset_seed()
     tutils.set_random_master_port()
@@ -34,7 +33,7 @@ def test_running_test_pretrained_model_ddp(tmpdir):
     checkpoint = tutils.init_checkpoint_callback(logger)
 
     trainer_options = dict(
-        show_progress_bar=False,
+        progress_bar_refresh_rate=0,
         max_epochs=1,
         train_percent_check=0.4,
         val_percent_check=0.2,
@@ -82,7 +81,7 @@ def test_running_test_pretrained_model(tmpdir):
     checkpoint = tutils.init_checkpoint_callback(logger)
 
     trainer_options = dict(
-        show_progress_bar=False,
+        progress_bar_refresh_rate=0,
         max_epochs=4,
         train_percent_check=0.4,
         val_percent_check=0.2,
@@ -115,7 +114,7 @@ def test_load_model_from_checkpoint(tmpdir):
     model = LightningTestModel(hparams)
 
     trainer_options = dict(
-        show_progress_bar=False,
+        progress_bar_refresh_rate=0,
         max_epochs=2,
         train_percent_check=0.4,
         val_percent_check=0.2,
@@ -151,12 +150,10 @@ def test_load_model_from_checkpoint(tmpdir):
     tutils.assert_ok_model_acc(new_trainer)
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="test requires multi-GPU machine")
 def test_running_test_pretrained_model_dp(tmpdir):
     """Verify test() on pretrained model."""
     tutils.reset_seed()
-
-    if not tutils.can_run_gpu_test():
-        return
 
     hparams = tutils.get_default_hparams()
     model = LightningTestModel(hparams)
@@ -168,8 +165,7 @@ def test_running_test_pretrained_model_dp(tmpdir):
     checkpoint = tutils.init_checkpoint_callback(logger)
 
     trainer_options = dict(
-        show_progress_bar=True,
-        max_epochs=4,
+        max_epochs=2,
         train_percent_check=0.4,
         val_percent_check=0.2,
         checkpoint_callback=checkpoint,
@@ -195,10 +191,9 @@ def test_running_test_pretrained_model_dp(tmpdir):
     tutils.assert_ok_model_acc(new_trainer)
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="test requires multi-GPU machine")
 def test_dp_resume(tmpdir):
     """Make sure DP continues training correctly."""
-    if not tutils.can_run_gpu_test():
-        return
 
     tutils.reset_seed()
 
@@ -206,8 +201,7 @@ def test_dp_resume(tmpdir):
     model = LightningTestModel(hparams)
 
     trainer_options = dict(
-        show_progress_bar=True,
-        max_epochs=3,
+        max_epochs=1,
         gpus=2,
         distributed_backend='dp',
     )
@@ -333,7 +327,7 @@ def test_model_saving_loading(tmpdir):
 
 def test_load_model_with_missing_hparams(tmpdir):
     trainer_options = dict(
-        show_progress_bar=False,
+        progress_bar_refresh_rate=0,
         max_epochs=1,
         checkpoint_callback=ModelCheckpoint(tmpdir, save_top_k=-1),
         logger=False,

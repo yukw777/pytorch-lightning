@@ -14,7 +14,7 @@ from pytorch_lightning.callbacks import (
 )
 from pytorch_lightning.core.lightning import load_hparams_from_tags_csv
 from pytorch_lightning.trainer.logging import TrainerLoggingMixin
-from pytorch_lightning.utilities.debugging import MisconfigurationException
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
 from tests.base import (
     TestModelBase,
     DictHparamsModel,
@@ -24,6 +24,7 @@ from tests.base import (
     LightValidationMultipleDataloadersMixin,
     LightTrainDataloader,
     LightTestDataloader,
+    LightValidationMixin,
 )
 
 
@@ -33,7 +34,7 @@ def test_hparams_save_load(tmpdir):
     # logger file to get meta
     trainer_options = dict(
         default_save_path=tmpdir,
-        max_epochs=2,
+        max_epochs=1,
     )
 
     # fit model
@@ -196,7 +197,7 @@ def test_gradient_accumulation_scheduling(tmpdir):
     trainer = Trainer(accumulate_grad_batches=schedule,
                       train_percent_check=0.1,
                       val_percent_check=0.1,
-                      max_epochs=4,
+                      max_epochs=2,
                       default_save_path=tmpdir)
 
     # for the test
@@ -248,7 +249,19 @@ def test_dp_output_reduce():
     assert reduced['b']['c'] == out['b']['c']
 
 
-def test_model_checkpoint_options(tmpdir):
+@pytest.mark.parametrize(["save_top_k", "file_prefix", "expected_files"], [
+    pytest.param(-1, '', {'epoch=4.ckpt', 'epoch=3.ckpt', 'epoch=2.ckpt', 'epoch=1.ckpt', 'epoch=0.ckpt'},
+                 id="CASE K=-1  (all)"),
+    pytest.param(1, 'test_prefix_', {'test_prefix_epoch=4.ckpt'},
+                 id="CASE K=1 (2.5, epoch 4)"),
+    pytest.param(2, '', {'epoch=4.ckpt', 'epoch=2.ckpt'},
+                 id="CASE K=2 (2.5 epoch 4, 2.8 epoch 2)"),
+    pytest.param(4, '', {'epoch=1.ckpt', 'epoch=4.ckpt', 'epoch=3.ckpt', 'epoch=2.ckpt'},
+                 id="CASE K=4 (save all 4 base)"),
+    pytest.param(3, '', {'epoch=2.ckpt', 'epoch=3.ckpt', 'epoch=4.ckpt'},
+                 id="CASE K=3 (save the 2nd, 3rd, 4th model)"),
+])
+def test_model_checkpoint_options(tmpdir, save_top_k, file_prefix, expected_files):
     """Test ModelCheckpoint options."""
 
     def mock_save_function(filepath):
@@ -258,13 +271,9 @@ def test_model_checkpoint_options(tmpdir):
     _ = LightningTestModel(hparams)
 
     # simulated losses
-    save_dir = os.path.join(tmpdir, '1')
-    os.mkdir(save_dir)
     losses = [10, 9, 2.8, 5, 2.5]
 
-    # -----------------
-    # CASE K=-1  (all)
-    checkpoint_callback = ModelCheckpoint(save_dir, save_top_k=-1, verbose=1)
+    checkpoint_callback = ModelCheckpoint(tmpdir, save_top_k=save_top_k, prefix=file_prefix, verbose=1)
     checkpoint_callback.save_function = mock_save_function
     trainer = Trainer()
 
@@ -274,127 +283,13 @@ def test_model_checkpoint_options(tmpdir):
         trainer.callback_metrics = {'val_loss': loss}
         checkpoint_callback.on_validation_end(trainer, trainer.get_model())
 
-    file_lists = set(os.listdir(save_dir))
+    file_lists = set(os.listdir(tmpdir))
 
-    assert len(file_lists) == len(losses), "Should save all models when save_top_k=-1"
+    assert len(file_lists) == len(expected_files), \
+        "Should save %i models when save_top_k=%i" % (len(expected_files), save_top_k)
 
     # verify correct naming
-    for fname in {'epoch=4.ckpt',
-                  'epoch=3.ckpt',
-                  'epoch=2.ckpt',
-                  'epoch=1.ckpt',
-                  'epoch=0.ckpt'}:
-        assert fname in file_lists
-
-    save_dir = os.path.join(tmpdir, '2')
-    os.mkdir(save_dir)
-
-    # -----------------
-    # CASE K=0 (none)
-    checkpoint_callback = ModelCheckpoint(save_dir, save_top_k=0, verbose=1)
-    checkpoint_callback.save_function = mock_save_function
-    trainer = Trainer()
-
-    # emulate callback's calls during the training
-    for i, loss in enumerate(losses):
-        trainer.current_epoch = i
-        trainer.callback_metrics = {'val_loss': loss}
-        checkpoint_callback.on_validation_end(trainer, trainer.get_model())
-
-    file_lists = os.listdir(save_dir)
-
-    assert len(file_lists) == 0, "Should save 0 models when save_top_k=0"
-
-    save_dir = os.path.join(tmpdir, '3')
-    os.mkdir(save_dir)
-
-    # -----------------
-    # CASE K=1 (2.5, epoch 4)
-    checkpoint_callback = ModelCheckpoint(save_dir, save_top_k=1, verbose=1, prefix='test_prefix_')
-    checkpoint_callback.save_function = mock_save_function
-    trainer = Trainer()
-
-    # emulate callback's calls during the training
-    for i, loss in enumerate(losses):
-        trainer.current_epoch = i
-        trainer.callback_metrics = {'val_loss': loss}
-        checkpoint_callback.on_validation_end(trainer, trainer.get_model())
-
-    file_lists = set(os.listdir(save_dir))
-
-    assert len(file_lists) == 1, "Should save 1 model when save_top_k=1"
-    assert 'test_prefix_epoch=4.ckpt' in file_lists
-
-    save_dir = os.path.join(tmpdir, '4')
-    os.mkdir(save_dir)
-
-    # -----------------
-    # CASE K=2 (2.5 epoch 4, 2.8 epoch 2)
-    # make sure other files don't get deleted
-
-    checkpoint_callback = ModelCheckpoint(save_dir, save_top_k=2, verbose=1)
-    open(f"{save_dir}/other_file.ckpt", 'a').close()
-    checkpoint_callback.save_function = mock_save_function
-    trainer = Trainer()
-
-    # emulate callback's calls during the training
-    for i, loss in enumerate(losses):
-        trainer.current_epoch = i
-        trainer.callback_metrics = {'val_loss': loss}
-        checkpoint_callback.on_validation_end(trainer, trainer.get_model())
-
-    file_lists = set(os.listdir(save_dir))
-
-    assert len(file_lists) == 3, 'Should save 2 model when save_top_k=2'
-    for fname in {'epoch=4.ckpt',
-                  'epoch=2.ckpt',
-                  'other_file.ckpt'}:
-        assert fname in file_lists
-
-    save_dir = os.path.join(tmpdir, '5')
-    os.mkdir(save_dir)
-
-    # -----------------
-    # CASE K=4 (save all 4 base)
-    # multiple checkpoints within same epoch
-
-    checkpoint_callback = ModelCheckpoint(save_dir, save_top_k=4, verbose=1)
-    checkpoint_callback.save_function = mock_save_function
-    trainer = Trainer()
-
-    # emulate callback's calls during the training
-    for loss in losses:
-        trainer.current_epoch = 0
-        trainer.callback_metrics = {'val_loss': loss}
-        checkpoint_callback.on_validation_end(trainer, trainer.get_model())
-
-    file_lists = set(os.listdir(save_dir))
-
-    assert len(file_lists) == 4, 'Should save all 4 models when save_top_k=4 within same epoch'
-
-    save_dir = os.path.join(tmpdir, '6')
-    os.mkdir(save_dir)
-
-    # -----------------
-    # CASE K=3 (save the 2nd, 3rd, 4th model)
-    # multiple checkpoints within same epoch
-
-    checkpoint_callback = ModelCheckpoint(save_dir, save_top_k=3, verbose=1)
-    checkpoint_callback.save_function = mock_save_function
-    trainer = Trainer()
-
-    # emulate callback's calls during the training
-    for loss in losses:
-        trainer.current_epoch = 0
-        trainer.callback_metrics = {'val_loss': loss}
-        checkpoint_callback.on_validation_end(trainer, trainer.get_model())
-
-    file_lists = set(os.listdir(save_dir))
-
-    assert len(file_lists) == 3, 'Should save 3 models when save_top_k=3'
-    for fname in {'epoch=0.ckpt',
-                  'epoch=0.ckpt',
-                  'epoch=0.ckpt'}:
+    for fname in expected_files:
         assert fname in file_lists
 
 
@@ -437,7 +332,7 @@ def test_resume_from_checkpoint_epoch_restored(tmpdir):
     model = _new_model()
 
     trainer_options = dict(
-        show_progress_bar=False,
+        progress_bar_refresh_rate=0,
         max_epochs=2,
         train_percent_check=0.65,
         val_percent_check=1,
@@ -465,10 +360,10 @@ def test_resume_from_checkpoint_epoch_restored(tmpdir):
         state = torch.load(check)
 
         # Resume training
-        trainer_options['max_epochs'] = 4
+        trainer_options['max_epochs'] = 2
         new_trainer = Trainer(**trainer_options, resume_from_checkpoint=check)
         new_trainer.fit(next_model)
-        assert state['global_step'] + next_model.num_batches_seen == training_batches * 4
+        assert state['global_step'] + next_model.num_batches_seen == training_batches * trainer_options['max_epochs']
 
 
 def _init_steps_model():
@@ -477,7 +372,7 @@ def _init_steps_model():
     model, _ = tutils.get_default_model()
 
     # define train epoch to 5% of data
-    train_percent = 0.05
+    train_percent = 0.5
     # get number of samples in 1 epoch
     num_train_samples = math.floor(len(model.train_dataloader()) * train_percent)
 
@@ -494,7 +389,7 @@ def test_trainer_max_steps_and_epochs(tmpdir):
     # define less train steps than epochs
     trainer_options.update(dict(
         default_save_path=tmpdir,
-        max_epochs=5,
+        max_epochs=3,
         max_steps=num_train_samples + 10
     ))
 
@@ -518,8 +413,8 @@ def test_trainer_max_steps_and_epochs(tmpdir):
     assert result == 1, "Training did not complete"
 
     # check training stopped at max_epochs
-    assert trainer.global_step == num_train_samples * trainer.max_epochs \
-        and trainer.current_epoch == trainer.max_epochs - 1, "Model did not stop at max_epochs"
+    assert trainer.global_step == num_train_samples * trainer.max_epochs
+    assert trainer.current_epoch == trainer.max_epochs - 1, "Model did not stop at max_epochs"
 
 
 def test_trainer_min_steps_and_epochs(tmpdir):
@@ -532,7 +427,7 @@ def test_trainer_min_steps_and_epochs(tmpdir):
         early_stop_callback=EarlyStopping(monitor='val_loss', min_delta=1.0),
         val_check_interval=2,
         min_epochs=1,
-        max_epochs=10
+        max_epochs=5
     ))
 
     # define less min steps than 1 epoch
@@ -624,3 +519,110 @@ def test_testpass_overrides(tmpdir):
 
     model = LightningTestModel(hparams)
     Trainer().test(model)
+
+
+def test_disabled_validation():
+    """Verify that `val_percent_check=0` disables the validation loop unless `fast_dev_run=True`."""
+    tutils.reset_seed()
+
+    class CurrentModel(LightTrainDataloader, LightValidationMixin, TestModelBase):
+
+        validation_step_invoked = False
+        validation_end_invoked = False
+
+        def validation_step(self, *args, **kwargs):
+            self.validation_step_invoked = True
+            return super().validation_step(*args, **kwargs)
+
+        def validation_end(self, *args, **kwargs):
+            self.validation_end_invoked = True
+            return super().validation_end(*args, **kwargs)
+
+    hparams = tutils.get_default_hparams()
+    model = CurrentModel(hparams)
+
+    trainer_options = dict(
+        show_progress_bar=False,
+        max_epochs=2,
+        train_percent_check=0.4,
+        val_percent_check=0.0,
+        fast_dev_run=False,
+    )
+
+    trainer = Trainer(**trainer_options)
+    result = trainer.fit(model)
+
+    # check that val_percent_check=0 turns off validation
+    assert result == 1, 'training failed to complete'
+    assert trainer.current_epoch == 1
+    assert not model.validation_step_invoked, '`validation_step` should not run when `val_percent_check=0`'
+    assert not model.validation_end_invoked, '`validation_end` should not run when `val_percent_check=0`'
+
+    # check that val_percent_check has no influence when fast_dev_run is turned on
+    model = CurrentModel(hparams)
+    trainer_options.update(fast_dev_run=True)
+    trainer = Trainer(**trainer_options)
+    result = trainer.fit(model)
+
+    assert result == 1, 'training failed to complete'
+    assert trainer.current_epoch == 0
+    assert model.validation_step_invoked, 'did not run `validation_step` with `fast_dev_run=True`'
+    assert model.validation_end_invoked, 'did not run `validation_end` with `fast_dev_run=True`'
+
+
+def test_nan_loss_detection(tmpdir):
+    test_step = 8
+
+    class InfLossModel(LightTrainDataloader, TestModelBase):
+
+        def training_step(self, batch, batch_idx):
+            output = super().training_step(batch, batch_idx)
+            if batch_idx == test_step:
+                if isinstance(output, dict):
+                    output['loss'] *= torch.tensor(math.inf)  # make loss infinite
+                else:
+                    output /= 0
+            return output
+
+    hparams = tutils.get_default_hparams()
+    model = InfLossModel(hparams)
+
+    # fit model
+    trainer = Trainer(
+        default_save_path=tmpdir,
+        max_steps=(test_step + 1),
+    )
+
+    with pytest.raises(ValueError, match=r'.*The loss returned in `training_step` is nan or inf.*'):
+        trainer.fit(model)
+        assert trainer.global_step == test_step
+
+    for param in model.parameters():
+        assert torch.isfinite(param).all()
+
+
+def test_nan_params_detection(tmpdir):
+    test_step = 8
+
+    class NanParamModel(LightTrainDataloader, TestModelBase):
+
+        def on_after_backward(self):
+            if self.global_step == test_step:
+                # simulate parameter that became nan
+                torch.nn.init.constant_(self.c_d1.bias, math.nan)
+
+    hparams = tutils.get_default_hparams()
+
+    model = NanParamModel(hparams)
+    trainer = Trainer(
+        default_save_path=tmpdir,
+        max_steps=(test_step + 1),
+    )
+
+    with pytest.raises(ValueError, match=r'.*Detected nan and/or inf values in `c_d1.bias`.*'):
+        trainer.fit(model)
+        assert trainer.global_step == test_step
+
+    # after aborting the training loop, model still has nan-valued params
+    params = torch.cat([param.view(-1) for param in model.parameters()])
+    assert not torch.isfinite(params).all()

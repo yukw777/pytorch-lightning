@@ -4,13 +4,12 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from argparse import Namespace
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Sequence
 
 import torch
 import torch.distributed as torch_distrib
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel
-from torch.optim import Adam
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 
@@ -20,7 +19,7 @@ from pytorch_lightning.core.hooks import ModelHooks
 from pytorch_lightning.core.memory import ModelSummary
 from pytorch_lightning.core.saving import ModelIO, load_hparams_from_tags_csv
 from pytorch_lightning.overrides.data_parallel import LightningDistributedDataParallel
-from pytorch_lightning.utilities.debugging import MisconfigurationException
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
 
 try:
     import torch_xla.core.xla_model as xm
@@ -230,6 +229,78 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
         """
         Warnings:
             Deprecated in v0.7.0. use training_step_end instead
+        """
+
+    def training_epoch_end(
+            self,
+            outputs: Union[List[Dict[str, Tensor]], List[List[Dict[str, Tensor]]]]
+    ) -> Dict[str, Dict[str, Tensor]]:
+        """Called at the end of training epoch with the outputs of all training_steps
+
+        .. code-block:: python
+
+            # the pseudocode for these calls
+
+            train_outs = []
+            for train_batch in train_data:
+                out = training_step(train_batch)
+                train_outs.append(out)
+            training_epoch_end(val_outs)
+
+        Args:
+            outputs: List of outputs you defined in training_step, or if there are multiple
+            dataloaders, a list containing a list of outputs for each dataloader
+
+        Return:
+            Dict or OrderedDict (dict): Dict has the following optional keys:
+            progress_bar -> Dict for progress bar display. Must have only tensors
+            log -> Dict of metrics to add to logger. Must have only tensors (no images, etc)
+
+        .. note:: If this method is not overridden, this won't be called.
+
+        - The outputs here are strictly for logging or progress bar.
+        - If you don't need to display anything, don't return anything.
+        - If you want to manually set current step, you can specify the 'step' key in the 'log' Dict
+
+        Examples:
+            With a single dataloader
+
+            .. code-block:: python
+
+                def training_epoch_end(self, outputs):
+                    train_acc_mean = 0
+                    for output in outputs:
+                        train_acc_mean += output['train_acc']
+
+                    train_acc_mean /= len(outputs)
+
+                    # log training accuracy at the end of an epoch
+                    results = {
+                        'log': {'train_acc': train_acc_mean.item()}
+                    }
+                    return results
+
+            With multiple dataloaders, `outputs` will be a list of lists. The outer list contains
+            one entry per dataloader, while the inner list contains the individual outputs of
+            each validation step for that dataloader.
+
+            .. code-block:: python
+
+                def training_epoch_end(self, outputs):
+                    train_acc_mean = 0
+                    i = 0
+                    for dataloader_outputs in outputs:
+                        for output in dataloader_outputs:
+                            train_acc_mean += output['train_acc']
+                            i += 1
+
+                    train_acc_mean /= i
+
+                    # log training accuracy at the end of an epoch
+                    results = {
+                        'log': {'train_acc': train_acc_mean.item(), 'step': self.current_epoch}
+                    }
+                    return results
         """
 
     def training_step_end(self, *args, **kwargs) -> Dict[
@@ -454,7 +525,7 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
             outputs: Union[List[Dict[str, Tensor]], List[List[Dict[str, Tensor]]]]
     ) -> Dict[str, Dict[str, Tensor]]:
         """
-        Called at end of validation epoch with the output of all validation_steps
+        Called at end of validation epoch with the outputs of all validation_steps
 
         .. code-block:: python
 
@@ -463,7 +534,7 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
             val_outs = []
             for val_batch in val_data:
                 out = validation_step(train_batch)
-                train_outs.append(out)
+                val_outs.append(out)
             validation_epoch_end(val_outs)
 
         Args:
@@ -494,7 +565,7 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
                     val_acc_mean /= len(outputs)
                     tqdm_dict = {'val_acc': val_acc_mean.item()}
 
-                    # show val_loss and val_acc in progress bar but only log val_loss
+                    # show val_acc in progress bar but only log val_loss
                     results = {
                         'progress_bar': tqdm_dict,
                         'log': {'val_acc': val_acc_mean.item()}
@@ -905,24 +976,33 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
 
         return model, optimizers
 
-    def configure_optimizers(self) -> Union[
-        Optimizer, List[Optimizer], Tuple[Optimizer, ...], Tuple[List[Optimizer], List]
-    ]:
+    def configure_optimizers(self) -> Optional[Union[
+        Optimizer, Sequence[Optimizer], Dict, Sequence[Dict], Tuple[List, List]
+    ]]:
         r"""
         Choose what optimizers and learning-rate schedulers to use in your optimization.
         Normally you'd need one. But in the case of GANs or similar you might have multiple.
 
-        If you don't define this method Lightning will automatically use Adam(lr=1e-3)
+        Return: any of these 6 options:
+            - Single optimizer.
+            - List or Tuple - List of optimizers.
+            - Two lists - The first list has multiple optimizers, the second a list of LR schedulers.
+            - Dictionary, with an `optimizer` key and (optionally) a `lr_scheduler` key.
+            - Tuple of dictionaries as described, with an optional `frequency` key.
+            - None - Fit will run without any optimizer.
 
-        Return: any of these 3 options:
-            - Single optimizer
-            - List or Tuple - List of optimizers
-            - Two lists - The first list has multiple optimizers, the second a list of LR schedulers
+        Note:
+            The `frequency` value is an int corresponding to the number of sequential batches
+            optimized with the specific optimizer. It should be given to none or to all of the optimizers.
+            There is difference between passing multiple optimizers in a list,
+            and passing multiple optimizers in dictionaries with a frequency of 1:
+            In the former case, all optimizers will operate on the given batch in each optimization step.
+            In the latter, only one optimizer will operate on the given batch at every step.
 
         Examples:
             .. code-block:: python
 
-                # most cases (default if not defined)
+                # most cases
                 def configure_optimizers(self):
                     opt = Adam(self.parameters(), lr=1e-3)
                     return opt
@@ -948,6 +1028,18 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
                                  'interval': 'step'}  # called after each training step
                     dis_sched = CosineAnnealing(discriminator_opt, T_max=10) # called every epoch
                     return [gen_opt, dis_opt], [gen_sched, dis_sched]
+
+                # example with optimizer frequencies
+                # see training procedure in `Improved Training of Wasserstein GANs`, Algorithm 1
+                # https://arxiv.org/abs/1704.00028
+                def configure_optimizers(self):
+                    gen_opt = Adam(self.model_gen.parameters(), lr=0.01)
+                    dis_opt = Adam(self.model_disc.parameters(), lr=0.02)
+                    n_critic = 5
+                    return (
+                        {'optimizer': dis_opt, 'frequency': n_critic},
+                        {'optimizer': gen_opt, 'frequency': 1}
+                    )
 
         Note:
 
@@ -983,7 +1075,6 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
                   }
 
         """
-        return Adam(self.parameters(), lr=1e-3)
 
     def optimizer_step(
             self,
@@ -1324,6 +1415,7 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
             checkpoint_path: str,
             map_location: Optional[Union[Dict[str, str], str, torch.device, int, Callable]] = None,
             tags_csv: Optional[str] = None,
+            *args, **kwargs
     ) -> 'LightningModule':
         r"""
 
@@ -1346,6 +1438,7 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
 
         Args:
             checkpoint_path: Path to checkpoint.
+            model_args: Any keyword args needed to init the model.
             map_location:
                 If your checkpoint saved a GPU model and you now load on CPUs
                 or a different number of GPUs, use this to map to the new setup.
@@ -1387,6 +1480,14 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
                     tags_csv='/path/to/hparams_file.csv'
                 )
 
+                # or load passing whatever args the model takes to load
+                MyLightningModule.load_from_checkpoint(
+                    'path/to/checkpoint.ckpt',
+                    learning_rate=0.1,
+                    layers=2,
+                    pretrained_model=some_model
+                )
+
                 # predict
                 pretrained_model.eval()
                 pretrained_model.freeze()
@@ -1403,11 +1504,11 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
             hparams.__setattr__('on_gpu', False)
             checkpoint['hparams'] = vars(hparams)
 
-        model = cls._load_model_state(checkpoint)
+        model = cls._load_model_state(checkpoint, *args, **kwargs)
         return model
 
     @classmethod
-    def _load_model_state(cls, checkpoint: Dict[str, Any]) -> 'LightningModule':
+    def _load_model_state(cls, checkpoint: Dict[str, Any], *args, **kwargs) -> 'LightningModule':
         cls_takes_hparams = 'hparams' in inspect.signature(cls.__init__).parameters
         ckpt_hparams = checkpoint.get('hparams')
 
@@ -1433,7 +1534,10 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
 
         # load the state_dict on the model automatically
         model_args = [hparams] if hparams else []
-        model = cls(*model_args)
+        if len(model_args) > 0:
+            model = cls(*model_args)
+        else:
+            model = cls(*args, **kwargs)
         model.load_state_dict(checkpoint['state_dict'])
 
         # give model a chance to load something
@@ -1525,9 +1629,10 @@ class LightningModule(ABC, GradInformation, ModelIO, ModelHooks):
             Dictionary with the items to be displayed in the progress bar.
         """
         # call .item() only once but store elements without graphs
-        running_training_loss = self.trainer.running_loss.mean().cpu().item()
+        running_train_loss = self.trainer.running_loss.mean()
+        avg_training_loss = running_train_loss.cpu().item() if running_train_loss is not None else float('NaN')
         tqdm_dict = {
-            'loss': '{:.3f}'.format(running_training_loss)
+            'loss': '{:.3f}'.format(avg_training_loss)
         }
 
         if self.trainer.truncated_bptt_steps is not None:

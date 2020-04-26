@@ -2,7 +2,7 @@ import pytest
 
 import tests.base.utils as tutils
 from pytorch_lightning import Trainer
-from pytorch_lightning.utilities.debugging import MisconfigurationException
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
 from tests.base import (
     TestModelBase,
     LightningTestModel,
@@ -16,7 +16,8 @@ from tests.base import (
     LightTrainDataloader,
     LightInfTrainDataloader,
     LightInfValDataloader,
-    LightInfTestDataloader
+    LightInfTestDataloader,
+    LightZeroLenDataloader
 )
 
 
@@ -458,3 +459,26 @@ def test_inf_test_dataloader(tmpdir):
 
     # verify training completed
     assert result == 1
+
+
+def test_error_on_zero_len_dataloader(tmpdir):
+    """ Test that error is raised if a zero-length dataloader is defined """
+    tutils.reset_seed()
+
+    class CurrentTestModel(
+        LightZeroLenDataloader,
+        LightningTestModel
+    ):
+        pass
+
+    hparams = tutils.get_default_hparams()
+    model = CurrentTestModel(hparams)
+
+    # fit model
+    with pytest.raises(ValueError):
+        trainer = Trainer(
+            default_save_path=tmpdir,
+            max_epochs=1,
+            test_percent_check=0.5
+        )
+        trainer.fit(model)

@@ -1,16 +1,14 @@
+import distutils
 import inspect
 import os
 import sys
 import warnings
 from argparse import ArgumentParser
 from typing import Union, Optional, List, Dict, Tuple, Iterable, Any
-import distutils
 
 import torch
 import torch.distributed as torch_distrib
 import torch.multiprocessing as mp
-from torch import optim
-from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -18,23 +16,24 @@ from pytorch_lightning import _logger as log
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, Callback
 from pytorch_lightning.core.lightning import LightningModule
 from pytorch_lightning.loggers import LightningLoggerBase
-from pytorch_lightning.profiler import Profiler, PassThroughProfiler
-from pytorch_lightning.profiler.profiler import BaseProfiler
+from pytorch_lightning.profiler import SimpleProfiler, PassThroughProfiler, BaseProfiler
 from pytorch_lightning.trainer.auto_mix_precision import TrainerAMPMixin
 from pytorch_lightning.trainer.callback_config import TrainerCallbackConfigMixin
 from pytorch_lightning.trainer.callback_hook import TrainerCallbackHookMixin
 from pytorch_lightning.trainer.data_loading import TrainerDataLoadingMixin
-from pytorch_lightning.trainer.deprecated_api import TrainerDeprecatedAPITillVer0_8
+from pytorch_lightning.trainer.deprecated_api import (TrainerDeprecatedAPITillVer0_8,
+                                                      TrainerDeprecatedAPITillVer0_9)
 from pytorch_lightning.trainer.distrib_data_parallel import TrainerDDPMixin
 from pytorch_lightning.trainer.distrib_parts import TrainerDPMixin, parse_gpu_ids, determine_root_gpu_device
 from pytorch_lightning.trainer.evaluation_loop import TrainerEvaluationLoopMixin
 from pytorch_lightning.trainer.logging import TrainerLoggingMixin
 from pytorch_lightning.trainer.model_hooks import TrainerModelHooksMixin
+from pytorch_lightning.trainer.optimizers import TrainerOptimizersMixin
+from pytorch_lightning.trainer.supporters import TensorRunningMean
 from pytorch_lightning.trainer.training_io import TrainerIOMixin
 from pytorch_lightning.trainer.training_loop import TrainerTrainLoopMixin
 from pytorch_lightning.trainer.training_tricks import TrainerTrainingTricksMixin
-from pytorch_lightning.utilities.debugging import MisconfigurationException
-from pytorch_lightning.trainer.supporting_classes import TensorRunningMean
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
 
 try:
     from apex import amp
@@ -55,6 +54,7 @@ else:
 
 class Trainer(
     TrainerIOMixin,
+    TrainerOptimizersMixin,
     TrainerDPMixin,
     TrainerDDPMixin,
     TrainerLoggingMixin,
@@ -67,12 +67,13 @@ class Trainer(
     TrainerCallbackConfigMixin,
     TrainerCallbackHookMixin,
     TrainerDeprecatedAPITillVer0_8,
+    TrainerDeprecatedAPITillVer0_9,
 ):
     DEPRECATED_IN_0_8 = (
         'gradient_clip', 'nb_gpu_nodes', 'max_nb_epochs', 'min_nb_epochs',
         'add_row_log_interval', 'nb_sanity_val_steps'
     )
-    DEPRECATED_IN_0_9 = ('use_amp',)
+    DEPRECATED_IN_0_9 = ('use_amp', 'show_progress_bar')
 
     def __init__(
             self,
@@ -82,22 +83,18 @@ class Trainer(
             callbacks: List[Callback] = [],
             default_save_path: Optional[str] = None,
             gradient_clip_val: float = 0,
-            gradient_clip=None,  # backward compatible, todo: remove in v0.8.0
             process_position: int = 0,
-            nb_gpu_nodes=None,  # backward compatible, todo: remove in v0.8.0
             num_nodes: int = 1,
             gpus: Optional[Union[List[int], str, int]] = None,
             num_tpu_cores: Optional[int] = None,
             log_gpu_memory: Optional[str] = None,
-            show_progress_bar: bool = True,
+            show_progress_bar=None,  # backward compatible, todo: remove in v0.9.0
             progress_bar_refresh_rate: int = 1,
             overfit_pct: float = 0.0,
             track_grad_norm: int = -1,
             check_val_every_n_epoch: int = 1,
             fast_dev_run: bool = False,
             accumulate_grad_batches: Union[int, Dict[int, int], List[list]] = 1,
-            max_nb_epochs=None,  # backward compatible, todo: remove in v0.8.0
-            min_nb_epochs=None,  # backward compatible, todo: remove in v0.8.0
             max_epochs: int = 1000,
             min_epochs: int = 1,
             max_steps: Optional[int] = None,
@@ -110,19 +107,23 @@ class Trainer(
             row_log_interval: int = 10,
             add_row_log_interval=None,  # backward compatible, todo: remove in v0.8.0
             distributed_backend: Optional[str] = None,
-            use_amp=False,  # backward compatible, todo: remove in v0.9.0
             precision: int = 32,
             print_nan_grads: bool = False,  # backward compatible, todo: remove in v0.9.0
-            weights_summary: str = 'full',
+            weights_summary: Optional[str] = 'full',
             weights_save_path: Optional[str] = None,
             amp_level: str = 'O1',
-            nb_sanity_val_steps=None,  # backward compatible, todo: remove in v0.8.0
             num_sanity_val_steps: int = 5,
             truncated_bptt_steps: Optional[int] = None,
             resume_from_checkpoint: Optional[str] = None,
             profiler: Optional[BaseProfiler] = None,
             benchmark: bool = False,
             reload_dataloaders_every_epoch: bool = False,
+            gradient_clip=None,  # backward compatible, todo: remove in v0.8.0
+            nb_gpu_nodes=None,  # backward compatible, todo: remove in v0.8.0
+            max_nb_epochs=None,  # backward compatible, todo: remove in v0.8.0
+            min_nb_epochs=None,  # backward compatible, todo: remove in v0.8.0
+            use_amp=False,  # backward compatible, todo: remove in v0.9.0
+            nb_sanity_val_steps=None,  # backward compatible, todo: remove in v0.8.0
             **kwargs
     ):
         r"""
@@ -162,9 +163,12 @@ class Trainer(
 
             log_gpu_memory: None, 'min_max', 'all'. Might slow performance
 
-            show_progress_bar: If true shows tqdm progress bar
+            show_progress_bar:
+                .. warning:: .. deprecated:: 0.7.2
 
-            progress_bar_refresh_rate: How often to refresh progress bar (in steps)
+                        Set `progress_bar_refresh_rate` to postive integer to enable. Will remove 0.9.0.
+
+            progress_bar_refresh_rate: How often to refresh progress bar (in steps). Value ``0`` disables progress bar.
 
             overfit_pct: How much of training-, validation-, and test dataset to check.
 
@@ -241,7 +245,7 @@ class Trainer(
 
             truncated_bptt_steps: Truncated back prop breaks performs backprop every k steps of
 
-            resume_from_checkpoint: To resume training from a specific checkpoint pass in the path here.k
+            resume_from_checkpoint: To resume training from a specific checkpoint pass in the path here.
 
             profiler:  To profile individual steps during training and assist in
 
@@ -275,7 +279,6 @@ class Trainer(
                           " and this method will be removed in v0.8.0", DeprecationWarning)
             self.gradient_clip = gradient_clip
 
-        self.reload_dataloaders_every_epoch = reload_dataloaders_every_epoch
         self.progress_bar_refresh_rate = progress_bar_refresh_rate
         self.check_val_every_n_epoch = check_val_every_n_epoch
         self.track_grad_norm = track_grad_norm
@@ -320,6 +323,8 @@ class Trainer(
                           " NaN grads will be printed automatically when detected.",
                           DeprecationWarning)
 
+        self.reload_dataloaders_every_epoch = reload_dataloaders_every_epoch
+
         self.truncated_bptt_steps = truncated_bptt_steps
         self.resume_from_checkpoint = resume_from_checkpoint
         self.shown_warnings = set()
@@ -328,11 +333,8 @@ class Trainer(
         if self.fast_dev_run:
             self.num_sanity_val_steps = 1
             self.max_epochs = 1
-            m = '''
-            Running in fast_dev_run mode: will run a full train,
-            val loop using a single batch
-            '''
-            log.info(m)
+            log.info('Running in fast_dev_run mode: will run a full train,'
+                     ' val loop using a single batch')
 
         # set default save path if user didn't provide one
         self.default_save_path = default_save_path
@@ -358,6 +360,7 @@ class Trainer(
         self.disable_validation = False
         self.lr_schedulers = []
         self.optimizers = None
+        self.optimizer_frequencies = []
         self.global_step = 0
         self.current_epoch = 0
         self.total_batches = 0
@@ -367,7 +370,7 @@ class Trainer(
 
         # configure profiler
         if profiler is True:
-            profiler = Profiler()
+            profiler = SimpleProfiler()
         self.profiler = profiler or PassThroughProfiler()
 
         # configure early stop callback
@@ -416,7 +419,9 @@ class Trainer(
 
         # can't init progress bar here because starting a new process
         # means the progress_bar won't survive pickling
-        self.show_progress_bar = show_progress_bar
+        # backward compatibility
+        if show_progress_bar is not None:
+            self.show_progress_bar = show_progress_bar
 
         # logging
         self.log_save_interval = log_save_interval
@@ -493,10 +498,10 @@ class Trainer(
              ('print_nan_grads', (<class 'bool'>,), False),
              ('process_position', (<class 'int'>,), 0),
              ('profiler',
-              (<class 'pytorch_lightning.profiler.profiler.BaseProfiler'>,
+              (<class 'pytorch_lightning.profiler.profilers.BaseProfiler'>,
                <class 'NoneType'>),
               None),
-            ...
+             ...
         """
         trainer_default_params = inspect.signature(cls).parameters
         name_type_default = []
@@ -654,6 +659,9 @@ class Trainer(
         # set up the passed in dataloaders (if needed)
         self.__attach_dataloaders(model, train_dataloader, val_dataloaders, test_dataloaders)
 
+        # check that model is configured correctly
+        self.check_model_configuration(model)
+
         # download the data and do whatever transforms we need
         # do before any spawn calls so that the model can assign properties
         # only on proc 0 because no spawn has happened yet
@@ -714,7 +722,7 @@ class Trainer(
 
             # CHOOSE OPTIMIZER
             # allow for lr schedulers as well
-            self.optimizers, self.lr_schedulers = self.init_optimizers(model.configure_optimizers())
+            self.optimizers, self.lr_schedulers, self.optimizer_frequencies = self.init_optimizers(model)
 
             self.run_pretrain_routine(model)
 
@@ -738,81 +746,13 @@ class Trainer(
         # when dataloader is passed via fit, patch the train_dataloader
         # functions to overwrite with these implementations
         if train_dataloader is not None:
-            if not self.is_overriden('training_step', model):
-                m = 'You called .fit() with a train_dataloader but did not define training_step()'
-                raise MisconfigurationException(m)
-
             model.train_dataloader = _PatchDataLoader(train_dataloader)
 
         if val_dataloaders is not None:
-            if not self.is_overriden('validation_step', model):
-                m = 'You called .fit() with a val_dataloaders but did not define validation_step()'
-                raise MisconfigurationException(m)
-
             model.val_dataloader = _PatchDataLoader(val_dataloaders)
 
         if test_dataloaders is not None:
-            if not self.is_overriden('test_step', model):
-                m = 'You called .fit() with a test_dataloaders but did not define test_step()'
-                raise MisconfigurationException(m)
-
             model.test_dataloader = _PatchDataLoader(test_dataloaders)
-
-    def init_optimizers(
-            self,
-            optimizers: Union[Optimizer, Tuple[List, List], List[Optimizer], Tuple[Optimizer]]
-    ) -> Tuple[List, List]:
-
-        # single output, single optimizer
-        if isinstance(optimizers, Optimizer):
-            return [optimizers], []
-
-        # two lists, optimizer + lr schedulers
-        elif len(optimizers) == 2 and isinstance(optimizers[0], list):
-            optimizers, lr_schedulers = optimizers
-            lr_schedulers = self.configure_schedulers(lr_schedulers)
-            return optimizers, lr_schedulers
-
-        # single list or tuple, multiple optimizer
-        elif isinstance(optimizers, (list, tuple)):
-            return optimizers, []
-
-        # unknown configuration
-        else:
-            raise ValueError('Unknown configuration for model optimizers. Output'
-                             'from model.configure_optimizers() should either be:'
-                             '* single output, single torch.optim.Optimizer'
-                             '* single output, list of torch.optim.Optimizer'
-                             '* two outputs, first being a list of torch.optim.Optimizer',
-                             'second being a list of torch.optim.lr_scheduler')
-
-    def configure_schedulers(self, schedulers: list):
-        # Convert each scheduler into dict sturcture with relevant information
-        lr_schedulers = []
-        default_config = {'interval': 'epoch',  # default every epoch
-                          'frequency': 1,  # default every epoch/batch
-                          'reduce_on_plateau': False,  # most often not ReduceLROnPlateau scheduler
-                          'monitor': 'val_loss'}  # default value to monitor for ReduceLROnPlateau
-        for scheduler in schedulers:
-            if isinstance(scheduler, dict):
-                if 'scheduler' not in scheduler:
-                    raise ValueError(f'Lr scheduler should have key `scheduler`',
-                                     ' with item being a lr scheduler')
-                scheduler['reduce_on_plateau'] = isinstance(
-                    scheduler['scheduler'], optim.lr_scheduler.ReduceLROnPlateau)
-
-                lr_schedulers.append({**default_config, **scheduler})
-
-            elif isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                lr_schedulers.append({**default_config, 'scheduler': scheduler,
-                                      'reduce_on_plateau': True})
-
-            elif isinstance(scheduler, optim.lr_scheduler._LRScheduler):
-                lr_schedulers.append({**default_config, 'scheduler': scheduler})
-            else:
-                raise ValueError(f'Input {scheduler} to lr schedulers '
-                                 'is a invalid input.')
-        return lr_schedulers
 
     def run_pretrain_routine(self, model: LightningModule):
         """Sanity check a few things before starting actual training.
@@ -855,8 +795,7 @@ class Trainer(
             if self.weights_summary in ['full', 'top']:
                 ref_model.summarize(mode=self.weights_summary)
             else:
-                m = "weights_summary can be None, 'full' or 'top'"
-                raise MisconfigurationException(m)
+                raise MisconfigurationException("weights_summary can be None, 'full' or 'top'")
 
         # track model now.
         # if cluster resets state, the model will update with the saved weights
@@ -888,15 +827,15 @@ class Trainer(
             pbar = tqdm(desc='Validation sanity check',
                         total=self.num_sanity_val_steps * len(self.val_dataloaders),
                         leave=False, position=2 * self.process_position,
-                        disable=not self.show_progress_bar, dynamic_ncols=True)
+                        disable=not self.progress_bar_refresh_rate, dynamic_ncols=True)
             self.main_progress_bar = pbar
             # dummy validation progress bar
             self.val_progress_bar = tqdm(disable=True)
 
-            eval_results = self.evaluate(model,
-                                         self.val_dataloaders,
-                                         self.num_sanity_val_steps,
-                                         False)
+            eval_results = self._evaluate(model,
+                                          self.val_dataloaders,
+                                          self.num_sanity_val_steps,
+                                          False)
             _, _, _, callback_metrics, _ = self.process_output(eval_results)
 
             # close progress bars
@@ -961,6 +900,62 @@ class Trainer(
 
         self.testing = False
 
+    def check_model_configuration(self, model: LightningModule):
+        r"""
+        Checks that the model is configured correctly before training is started.
+
+        Args:
+            model: The model to test.
+
+        """
+        # Check training_step, train_dataloader, configure_optimizer methods
+        if not self.is_overriden('training_step', model):
+            raise MisconfigurationException(
+                'No `training_step()` method defined. Lightning `Trainer` expects as minimum a'
+                ' `training_step()`, `training_dataloader()` and `configure_optimizers()` to be defined.')
+
+        if not self.is_overriden('train_dataloader', model):
+            raise MisconfigurationException(
+                'No `train_dataloader()` method defined. Lightning `Trainer` expects as minimum a'
+                ' `training_step()`, `training_dataloader()` and `configure_optimizers()` to be defined.')
+
+        if not self.is_overriden('configure_optimizers', model):
+            raise MisconfigurationException(
+                'No `configure_optimizers()` method defined. Lightning `Trainer` expects as minimum a'
+                ' `training_step()`, `training_dataloader()` and `configure_optimizers()` to be defined.')
+
+        # Check val_dataloader, validation_step and validation_epoch_end
+        if self.is_overriden('val_dataloader', model):
+            if not self.is_overriden('validation_step', model):
+                raise MisconfigurationException('You have passed in a `val_dataloader()`'
+                                                ' but have not defined `validation_step()`.')
+            else:
+                if not self.is_overriden('validation_epoch_end', model):
+                    warnings.warn('You have defined a `val_dataloader()` and have'
+                                  ' defined a `validation_step()`, you may also want to'
+                                  ' define `validation_epoch_end()` for accumulating stats.',
+                                  RuntimeWarning)
+        else:
+            if self.is_overriden('validation_step', model):
+                raise MisconfigurationException('You have defined `validation_step()`,'
+                                                ' but have not passed in a val_dataloader().')
+
+        # Check test_dataloader, test_step and test_epoch_end
+        if self.is_overriden('test_dataloader', model):
+            if not self.is_overriden('test_step', model):
+                raise MisconfigurationException('You have passed in a `test_dataloader()`'
+                                                ' but have not defined `test_step()`.')
+            else:
+                if not self.is_overriden('test_epoch_end', model):
+                    warnings.warn('You have defined a `test_dataloader()` and'
+                                  ' have defined a `test_step()`, you may also want to'
+                                  ' define `test_epoch_end()` for accumulating stats.',
+                                  RuntimeWarning)
+        else:
+            if self.is_overriden('test_step', model):
+                raise MisconfigurationException('You have defined `test_step()`,'
+                                                ' but have not passed in a `test_dataloader()`.')
+
 
 class _PatchDataLoader(object):
     r"""
@@ -971,8 +966,14 @@ class _PatchDataLoader(object):
         dataloader: Dataloader object to return when called.
 
     """
+
     def __init__(self, dataloader: Union[List[DataLoader], DataLoader]):
         self.dataloader = dataloader
+
+        # cannot pickle __code__ so cannot verify if PatchDataloader
+        # exists which shows dataloader methods have been overwritten.
+        # so, we hack it by using the string representation
+        self.patch_loader_code = str(self.__call__.__code__)
 
     def __call__(self) -> Union[List[DataLoader], DataLoader]:
         return self.dataloader

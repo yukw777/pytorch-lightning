@@ -1,23 +1,25 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 import torch.distributed
 
-from pytorch_lightning.metrics.utils import tensor_metric, numpy_metric
-from pytorch_lightning.utilities.apply_to_collection import apply_to_collection
+from pytorch_lightning.metrics.converters import tensor_metric, numpy_metric
+from pytorch_lightning.utilities.apply_func import apply_to_collection
 
-__all__ = ['AbstractMetric', 'TensorMetric', 'NumpyMetric']
+__all__ = ['Metric', 'TensorMetric', 'NumpyMetric']
 
 
-class AbstractMetric(torch.nn.Module, ABC):
+class Metric(torch.nn.Module, ABC):
+    """
+    Abstract Base Class for metric implementation.
+
+    Should be used to implement metrics that
+    1. Return multiple Outputs
+    2. Handle their own DDP sync
+    """
     def __init__(self, name: str):
         """
-        Abstract Base Class for metric implementation.
-        Should be used to implement metrics that
-        1.) Return multiple Outputs
-        2.) Handle their own DDP sync
-
         Args:
             name: the metric's name
 
@@ -28,20 +30,20 @@ class AbstractMetric(torch.nn.Module, ABC):
         self._device = torch.device('cpu')
 
     @property
-    def dtype(self):
+    def dtype(self) -> Union[str, torch.dtype]:
         return self._dtype
 
     @dtype.setter
-    def dtype(self, new_dtype: Any):
-        # Necessary to avoid infinite recursion
+    def dtype(self, new_dtype: Union[str, torch.dtype]):
+        # necessary to avoid infinite recursion
         raise RuntimeError('Cannot set the dtype explicitly. Please use metric.to(new_dtype).')
 
     @property
-    def device(self):
+    def device(self) -> Union[str, torch.device]:
         return self._device
 
     @device.setter
-    def device(self, new_device):
+    def device(self, new_device: Union[str, torch.device]):
         # Necessary to avoid infinite recursion
         raise RuntimeError('Cannot set the device explicitly. Please use metric.to(new_device).')
 
@@ -56,7 +58,7 @@ class AbstractMetric(torch.nn.Module, ABC):
         """
         raise NotImplementedError
 
-    def to(self, *args, **kwargs):
+    def to(self, *args, **kwargs) -> torch.nn.Module:
         """Moves and/or casts the parameters and buffers.
 
         This can be called as
@@ -78,7 +80,7 @@ class AbstractMetric(torch.nn.Module, ABC):
 
         See below for examples.
 
-        .. note::
+        Note:
             This method modifies the module in-place.
 
         Args:
@@ -93,32 +95,32 @@ class AbstractMetric(torch.nn.Module, ABC):
             Module: self
 
         Example::
+            >>> class ExampleMetric(Metric):
+            ...     def __init__(self, weight: torch.Tensor):
+            ...         super().__init__('example')
+            ...         self.register_buffer('weight', weight)
+            ...     def forward(self, pred, target) -> torch.Tensor:
+            ...         return (pred - target) * self.weight
+            >>> _ = torch.manual_seed(0)
+            >>> metric = ExampleMetric(torch.rand(3, 4))
+            >>> metric.weight
+            tensor([[0.4963, 0.7682, 0.0885, 0.1320],
+                    [0.3074, 0.6341, 0.4901, 0.8964],
+                    [0.4556, 0.6323, 0.3489, 0.4017]])
+            >>> metric.to(torch.double) #doctest: +ELLIPSIS
+            ExampleMetric()
+            >>> metric.weight
+            tensor([[...]], dtype=torch.float64)
+            >>> cpu = torch.device('cpu')
+            >>> metric.to(cpu, dtype=torch.half, non_blocking=True)
+            ExampleMetric()
+            >>> metric.weight #doctest: +ELLIPSIS
+            tensor([[...]], dtype=torch.float16)
+            >>> metric.to(cpu)
+            ExampleMetric()
+            >>> metric.weight #doctest: +ELLIPSIS
+            tensor([[...]], dtype=torch.float16)
 
-            >>> linear = nn.Linear(2, 2)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1913, -0.3420],
-                    [-0.5113, -0.2325]])
-            >>> linear.to(torch.double)
-            Linear(in_features=2, out_features=2, bias=True)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1913, -0.3420],
-                    [-0.5113, -0.2325]], dtype=torch.float64)
-            >>> gpu1 = torch.device("cuda:1")
-            >>> linear.to(gpu1, dtype=torch.half, non_blocking=True)
-            Linear(in_features=2, out_features=2, bias=True)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1914, -0.3420],
-                    [-0.5112, -0.2324]], dtype=torch.float16, device='cuda:1')
-            >>> cpu = torch.device("cpu")
-            >>> linear.to(cpu)
-            Linear(in_features=2, out_features=2, bias=True)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1914, -0.3420],
-                    [-0.5112, -0.2324]], dtype=torch.float16)
 
         """
         device, dtype, non_blocking = torch._C._nn._parse_to(*args, **kwargs)
@@ -130,7 +132,7 @@ class AbstractMetric(torch.nn.Module, ABC):
 
         return super().to(*args, **kwargs)
 
-    def cuda(self, device=None):
+    def cuda(self, device: Optional[int] = None) -> torch.nn.Module:
         """Moves all model parameters and buffers to the GPU.
 
         This also makes associated parameters and buffers different objects. So
@@ -148,7 +150,7 @@ class AbstractMetric(torch.nn.Module, ABC):
         self._device = torch.device('cuda', index=device)
         return super().cuda(device=device)
 
-    def cpu(self):
+    def cpu(self) -> torch.nn.Module:
         """Moves all model parameters and buffers to the CPU.
 
         Returns:
@@ -157,7 +159,7 @@ class AbstractMetric(torch.nn.Module, ABC):
         self._device = torch.device('cpu')
         return super().cpu()
 
-    def type(self, dst_type):
+    def type(self, dst_type: Union[str, torch.dtype]) -> torch.nn.Module:
         """Casts all parameters and buffers to :attr:`dst_type`.
 
         Arguments:
@@ -169,7 +171,7 @@ class AbstractMetric(torch.nn.Module, ABC):
         self._dtype = dst_type
         return super().type(dst_type=dst_type)
 
-    def float(self):
+    def float(self) -> torch.nn.Module:
         """Casts all floating point parameters and buffers to float datatype.
 
         Returns:
@@ -178,7 +180,7 @@ class AbstractMetric(torch.nn.Module, ABC):
         self._dtype = torch.float
         return super().float()
 
-    def double(self):
+    def double(self) -> torch.nn.Module:
         """Casts all floating point parameters and buffers to ``double`` datatype.
 
         Returns:
@@ -187,7 +189,7 @@ class AbstractMetric(torch.nn.Module, ABC):
         self._dtype = torch.double
         return super().double()
 
-    def half(self):
+    def half(self) -> torch.nn.Module:
         """Casts all floating point parameters and buffers to ``half`` datatype.
 
         Returns:
@@ -197,14 +199,16 @@ class AbstractMetric(torch.nn.Module, ABC):
         return super().half()
 
 
-class TensorMetric(AbstractMetric):
+class TensorMetric(Metric):
+    """
+    Base class for metric implementation operating directly on tensors.
+    All inputs and outputs will be casted to tensors if necessary.
+    Already handles DDP sync and input/output conversions.
+    """
     def __init__(self, name: str,
                  reduce_group: Optional[Any] = torch.distributed.group.WORLD,
                  reduce_op: Optional[Any] = torch.distributed.ReduceOp.SUM):
         """
-        Base class for metric implementation operating directly on tensors.
-        All inputs and outputs will be casted to tensors if necessary.
-        Already handles DDP sync and input/output conversions
 
         Args:
             name: the metric's name
@@ -218,19 +222,24 @@ class TensorMetric(AbstractMetric):
                                         reduce_op=reduce_op)(super().__call__)
 
     def __call__(self, *args, **kwargs) -> torch.Tensor:
+        def _to_device_dtype(x: torch.Tensor) -> torch.Tensor:
+            return x.to(device=self.device, dtype=self.dtype)
+
         return apply_to_collection(self._orig_call(*args, **kwargs), torch.Tensor,
-                                   lambda x: x.to(device=self.device, dtype=self.dtype))
+                                   _to_device_dtype)
 
 
-class NumpyMetric(AbstractMetric):
+class NumpyMetric(Metric):
+    """
+    Base class for metric implementation operating on numpy arrays.
+    All inputs will be casted to numpy if necessary and all outputs will
+    be casted to tensors if necessary.
+    Already handles DDP sync and input/output conversions.
+    """
     def __init__(self, name: str,
                  reduce_group: Optional[Any] = torch.distributed.group.WORLD,
                  reduce_op: Optional[Any] = torch.distributed.ReduceOp.SUM):
         """
-        Base class for metric implementation operating on numpy arrays.
-        All inputs will be casted to numpy if necessary and all outputs will
-        be casted to tensors if necessary.
-        Already handles DDP sync and input/output conversions
 
         Args:
             name: the metric's name
@@ -244,5 +253,8 @@ class NumpyMetric(AbstractMetric):
                                        reduce_op=reduce_op)(super().__call__)
 
     def __call__(self, *args, **kwargs) -> torch.Tensor:
+        def _to_device_dtype(x: torch.Tensor) -> torch.Tensor:
+            return x.to(device=self.device, dtype=self.dtype)
+
         return apply_to_collection(self._orig_call(*args, **kwargs), torch.Tensor,
-                                   lambda x: x.to(device=self.device, dtype=self.dtype))
+                                   _to_device_dtype)

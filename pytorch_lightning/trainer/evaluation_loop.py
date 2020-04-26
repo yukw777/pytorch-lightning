@@ -135,7 +135,7 @@ from tqdm.auto import tqdm
 
 from pytorch_lightning.core.lightning import LightningModule
 from pytorch_lightning.overrides.data_parallel import LightningDistributedDataParallel, LightningDataParallel
-from pytorch_lightning.utilities.debugging import MisconfigurationException
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
 
 try:
     import torch_xla.distributed.parallel_loader as xla_pl
@@ -163,7 +163,6 @@ class TrainerEvaluationLoopMixin(ABC):
     num_val_batches: int
     fast_dev_run: ...
     process_position: ...
-    show_progress_bar: ...
     process_output: ...
     training_tqdm_dict: ...
     proc_rank: int
@@ -217,7 +216,7 @@ class TrainerEvaluationLoopMixin(ABC):
     def reset_val_dataloader(self, *args):
         """Warning: this is just empty shell for code implemented in other class."""
 
-    def evaluate(self, model: LightningModule, dataloaders, max_batches: int, test_mode: bool = False):
+    def _evaluate(self, model: LightningModule, dataloaders, max_batches: int, test_mode: bool = False):
         """Run evaluation code.
 
         Args:
@@ -278,7 +277,7 @@ class TrainerEvaluationLoopMixin(ABC):
                 dl_outputs.append(output)
 
                 # batch done
-                if batch_idx % self.progress_bar_refresh_rate == 0:
+                if self.progress_bar_refresh_rate >= 1 and batch_idx % self.progress_bar_refresh_rate == 0:
                     if test_mode:
                         self.test_progress_bar.update(self.progress_bar_refresh_rate)
                     else:
@@ -322,9 +321,9 @@ class TrainerEvaluationLoopMixin(ABC):
     def run_evaluation(self, test_mode: bool = False):
         # when testing make sure user defined a test step
         if test_mode and not self.is_overriden('test_step'):
-            m = "You called `.test()` without defining model's `.test_step()`." \
-                " Please define and try again"
-            raise MisconfigurationException(m)
+            raise MisconfigurationException(
+                "You called `.test()` without defining model's `.test_step()`."
+                " Please define and try again")
 
         # Validation/Test begin callbacks
         if test_mode:
@@ -338,14 +337,14 @@ class TrainerEvaluationLoopMixin(ABC):
 
         # select dataloaders
         if test_mode:
-            if self.reload_dataloaders_every_epoch or self.test_dataloaders is None:
+            if self.test_dataloaders is None:
                 self.reset_test_dataloader(model)
 
             dataloaders = self.test_dataloaders
             max_batches = self.num_test_batches
         else:
             # val
-            if self.reload_dataloaders_every_epoch or self.val_dataloaders is None:
+            if self.val_dataloaders is None:
                 self.reset_val_dataloader(model)
 
             dataloaders = self.val_dataloaders
@@ -361,11 +360,11 @@ class TrainerEvaluationLoopMixin(ABC):
         desc = 'Testing' if test_mode else 'Validating'
         total = max_batches if max_batches != float('inf') else None
         pbar = tqdm(desc=desc, total=total, leave=test_mode, position=position,
-                    disable=not self.show_progress_bar, dynamic_ncols=True, file=sys.stdout)
+                    disable=not self.progress_bar_refresh_rate, dynamic_ncols=True, file=sys.stdout)
         setattr(self, f'{"test" if test_mode else "val"}_progress_bar', pbar)
 
         # run evaluation
-        eval_results = self.evaluate(self.model, dataloaders, max_batches, test_mode)
+        eval_results = self._evaluate(self.model, dataloaders, max_batches, test_mode)
         _, prog_bar_metrics, log_metrics, callback_metrics, _ = self.process_output(
             eval_results)
 
@@ -398,6 +397,15 @@ class TrainerEvaluationLoopMixin(ABC):
             self.test_progress_bar.close()
         else:
             self.val_progress_bar.close()
+
+        # eventual dataset reloading
+        if test_mode:
+            if self.reload_dataloaders_every_epoch:
+                self.reset_test_dataloader(model)
+        else:
+            # val
+            if self.reload_dataloaders_every_epoch:
+                self.reset_val_dataloader(model)
 
         # Validation/Test end callbacks
         if test_mode:

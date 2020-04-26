@@ -145,8 +145,9 @@ from pytorch_lightning import _logger as log
 from pytorch_lightning.callbacks.base import Callback
 from pytorch_lightning.core.lightning import LightningModule
 from pytorch_lightning.loggers import LightningLoggerBase
-from pytorch_lightning.utilities.debugging import MisconfigurationException
-from pytorch_lightning.trainer.supporting_classes import TensorRunningMean
+from pytorch_lightning.overrides.data_parallel import LightningDistributedDataParallel, LightningDataParallel
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
+from pytorch_lightning.trainer.supporters import TensorRunningMean
 
 try:
     from apex import amp
@@ -197,6 +198,7 @@ class TrainerTrainLoopMixin(ABC):
     total_batches: int
     truncated_bptt_steps: ...
     optimizers: ...
+    optimizer_frequencies: ...
     accumulate_grad_batches: int
     use_amp: bool
     track_grad_norm: ...
@@ -289,7 +291,9 @@ class TrainerTrainLoopMixin(ABC):
         model = self.get_model()
 
         # load data
-        self.reset_train_dataloader(model)
+        # if reload_dataloaders_every_epoch, this is moved to the epoch loop
+        if not self.reload_dataloaders_every_epoch:
+            self.reset_train_dataloader(model)
         self.reset_val_dataloader(model)
 
         # Train start events
@@ -305,6 +309,9 @@ class TrainerTrainLoopMixin(ABC):
         try:
             # run all epochs
             for epoch in range(self.current_epoch, self.max_epochs):
+                # reset train dataloader
+                if self.reload_dataloaders_every_epoch:
+                    self.reset_train_dataloader(model)
                 # set seed for distributed sampler (enables shuffling for each epoch)
                 if self.use_ddp \
                         and hasattr(self.train_dataloader.sampler, 'set_epoch'):
@@ -367,8 +374,8 @@ class TrainerTrainLoopMixin(ABC):
                 met_min_steps = self.global_step >= self.min_steps if self.min_steps else True
 
                 # TODO wrap this logic into the callback
-                if self.enable_early_stop and not self.disable_validation and is_val_epoch:
-                    if ((met_min_epochs and met_min_steps) or self.fast_dev_run):
+                if self.enable_early_stop:
+                    if (met_min_epochs and met_min_steps) or self.fast_dev_run:
                         should_stop = self.early_stop_callback.on_epoch_end(self, self.get_model())
                         # stop training
                         stop = should_stop and met_min_epochs
@@ -384,6 +391,9 @@ class TrainerTrainLoopMixin(ABC):
 
     def run_training_epoch(self):
 
+        # get model
+        model = self.get_model()
+
         # Epoch start events
         with self.profiler.profile('on_epoch_start'):
             # callbacks
@@ -391,11 +401,7 @@ class TrainerTrainLoopMixin(ABC):
 
             # model hooks
             if self.is_function_implemented('on_epoch_start'):
-                self.get_model().on_epoch_start()
-
-        # reset train dataloader
-        if self.reload_dataloaders_every_epoch:
-            self.reset_train_dataloader(self.get_model())
+                model.on_epoch_start()
 
         # track local dataloader so TPU can wrap each epoch
         train_dataloader = self.train_dataloader
@@ -405,6 +411,9 @@ class TrainerTrainLoopMixin(ABC):
             device = xm.xla_device()
             train_dataloader = xla_pl.ParallelLoader(train_dataloader, [device])
             train_dataloader = train_dataloader.per_device_loader(device)
+
+        # bookkeeping
+        outputs = []
 
         # run epoch
         for batch_idx, (batch, is_last_batch) in self.profiler.profile_iterable(
@@ -416,14 +425,15 @@ class TrainerTrainLoopMixin(ABC):
 
             self.batch_idx = batch_idx
 
-            model = self.get_model()
             model.global_step = self.global_step
 
             # ---------------
             # RUN TRAIN STEP
             # ---------------
-            output = self.run_training_batch(batch, batch_idx)
-            batch_result, grad_norm_dic, batch_step_metrics = output
+            _outputs = self.run_training_batch(batch, batch_idx)
+            batch_result, grad_norm_dic, batch_step_metrics, batch_output = _outputs
+            # detach tensors in batch_output before appending to outputs
+            outputs.append(_recursive_detach(batch_output))
 
             # when returning -1 from train_step, we end epoch early
             early_stop_epoch = batch_result == -1
@@ -461,8 +471,7 @@ class TrainerTrainLoopMixin(ABC):
             # CHECKPOINTING, EARLY STOPPING
             # ---------------
             # save checkpoint even when no test or val step are defined
-            train_step_only = not self.is_overriden('validation_step')
-            if self.fast_dev_run or should_check_val or train_step_only:
+            if self.fast_dev_run or should_check_val:
                 self.call_checkpoint_callback()
 
                 if self.enable_early_stop:
@@ -483,13 +492,32 @@ class TrainerTrainLoopMixin(ABC):
             if early_stop_epoch or self.fast_dev_run:
                 break
 
+        # process epoch outputs
+        if isinstance(model, (LightningDistributedDataParallel, LightningDataParallel)):
+            model = model.module
+
+        if self.is_overriden('training_epoch_end', model=model):
+            epoch_output = model.training_epoch_end(outputs)
+            _processed_outputs = self.process_output(epoch_output)
+            log_epoch_metrics = _processed_outputs[2]
+            callback_epoch_metrics = _processed_outputs[3]
+            self.log_metrics(log_epoch_metrics, {})
+            self.callback_metrics.update(callback_epoch_metrics)
+
+        # in case validation step is missing and you are not running fast-dev to duplicate last batch
+        if not self.is_overriden('validation_step') and not (self.fast_dev_run or should_check_val):
+            self.call_checkpoint_callback()
+
+            if self.enable_early_stop:
+                self.early_stop_callback.check_metrics(self.callback_metrics)
+
         # Epoch end events
         with self.profiler.profile('on_epoch_end'):
             # callbacks
             self.on_epoch_end()
             # model hooks
             if self.is_function_implemented('on_epoch_end'):
-                self.get_model().on_epoch_end()
+                model.on_epoch_end()
 
     def run_training_batch(self, batch, batch_idx):
         # track grad norms
@@ -524,8 +552,7 @@ class TrainerTrainLoopMixin(ABC):
         for split_idx, split_batch in enumerate(splits):
             self.split_idx = split_idx
 
-            # call training_step once per optimizer
-            for opt_idx, optimizer in enumerate(self.optimizers):
+            for opt_idx, optimizer in self._get_optimizers_iterable():
                 # make sure only the gradients of the current optimizer's paramaters are calculated
                 # in the training step to prevent dangling gradients in multiple-optimizer setup.
                 if len(self.optimizers) > 1:
@@ -539,14 +566,13 @@ class TrainerTrainLoopMixin(ABC):
                 def optimizer_closure():
                     # forward pass
                     with self.profiler.profile('model_forward'):
-                        output = self.training_forward(
+                        output_dict = self.training_forward(
                             split_batch, batch_idx, opt_idx, self.hiddens)
 
-                    closure_loss = output[0]
-                    progress_bar_metrics = output[1]
-                    log_metrics = output[2]
-                    callback_metrics = output[3]
-                    self.hiddens = output[4]
+                        # format and reduce outputs accordingly
+                        processed_output = self.process_output(output_dict, train=True)
+
+                    closure_loss, progress_bar_metrics, log_metrics, callback_metrics, self.hiddens = processed_output
 
                     # accumulate loss
                     # (if accumulate_grad_batches = 1 no effect)
@@ -570,10 +596,10 @@ class TrainerTrainLoopMixin(ABC):
                         with self.profiler.profile('on_after_backward'):
                             model_ref.on_after_backward()
 
-                    return closure_loss
+                    return closure_loss, output_dict
 
                 # calculate loss
-                loss = optimizer_closure()
+                loss, batch_output = optimizer_closure()
 
                 # check if loss or model weights are nan
                 self.detect_nan_tensors(loss)
@@ -599,7 +625,8 @@ class TrainerTrainLoopMixin(ABC):
                     model = self.get_model()
                     with self.profiler.profile('optimizer_step'):
                         model.optimizer_step(self.current_epoch, batch_idx,
-                                             optimizer, opt_idx, optimizer_closure)
+                                             optimizer, opt_idx,
+                                             lambda: optimizer_closure()[0])
 
                     # calculate running loss for display
                     self.running_loss.append(self.batch_loss_value.mean())
@@ -616,7 +643,7 @@ class TrainerTrainLoopMixin(ABC):
                 self.get_model().on_batch_end()
 
         # update progress bar
-        if batch_idx % self.progress_bar_refresh_rate == 0:
+        if self.progress_bar_refresh_rate >= 1 and batch_idx % self.progress_bar_refresh_rate == 0:
             self.main_progress_bar.update(self.progress_bar_refresh_rate)
             self.main_progress_bar.set_postfix(**self.training_tqdm_dict)
 
@@ -626,7 +653,20 @@ class TrainerTrainLoopMixin(ABC):
         # track all metrics for callbacks
         self.callback_metrics.update({k: v for d in all_callback_metrics for k, v in d.items()})
 
-        return 0, grad_norm_dic, all_log_metrics
+        return 0, grad_norm_dic, all_log_metrics, batch_output
+
+    def _get_optimizers_iterable(self):
+        if not self.optimizer_frequencies:
+            # call training_step once per optimizer
+            return list(enumerate(self.optimizers))
+
+        optimizer_freq_cumsum = np.cumsum(self.optimizer_frequencies)
+        optimizers_loop_length = optimizer_freq_cumsum[-1]
+        current_place_in_loop = self.total_batch_idx % optimizers_loop_length
+
+        # find optimzier index by looking for the first {item > current_place} in the cumsum list
+        opt_idx = np.argmax(optimizer_freq_cumsum > current_place_in_loop)
+        return [(opt_idx, self.optimizers[opt_idx])]
 
     def run_training_teardown(self):
         self.main_progress_bar.close()
@@ -709,20 +749,17 @@ class TrainerTrainLoopMixin(ABC):
             with self.profiler.profile('training_end'):
                 output = model_ref.training_end(output)
 
-            m = 'training_end was deprecated in 0.7.0 and will be removed 1.0.0. ' \
-                'Use training_epoch_end instead'
-            warnings.warn(m, DeprecationWarning)
-
-        # format and reduce outputs accordingly
-        output = self.process_output(output, train=True)
+            warnings.warn('`training_end` was deprecated in 0.7.0 and will be removed 1.0.0.'
+                          ' Use training_epoch_end instead', DeprecationWarning)
 
         return output
 
-    def update_learning_rates(self, interval):
-        ''' Update learning rates
+    def update_learning_rates(self, interval: str):
+        """Update learning rates.
+
         Args:
-            interval (str): either 'epoch' or 'step'.
-        '''
+            interval: either 'epoch' or 'step'.
+        """
         if not self.lr_schedulers:
             return
 
@@ -738,10 +775,11 @@ class TrainerTrainLoopMixin(ABC):
                     monitor_val = self.callback_metrics.get(monitor_key)
                     if monitor_val is None:
                         avail_metrics = ','.join(list(self.callback_metrics.keys()))
-                        m = f'ReduceLROnPlateau conditioned on metric {monitor_key} ' \
-                            f'which is not available. Available metrics are: {avail_metrics}. ' \
-                            'Condition can be set using `monitor` key in lr scheduler dict'
-                        raise MisconfigurationException(m)
+                        raise MisconfigurationException(
+                            f'ReduceLROnPlateau conditioned on metric {monitor_key}'
+                            f' which is not available. Available metrics are: {avail_metrics}.'
+                            ' Condition can be set using `monitor` key in lr scheduler dict'
+                        )
                     lr_scheduler['scheduler'].step(monitor_val)
                 else:
                     lr_scheduler['scheduler'].step()
@@ -763,3 +801,29 @@ def _with_is_last(iterable):
         last = val
     # yield last, no longer has next
     yield last, True
+
+
+def _recursive_detach(in_dict):
+    """Detach all tensors in `in_dict`.
+
+    May operate recursively if some of the values in `in_dict` are dictionaries
+    which contain instances of `torch.Tensor`. Other types in `in_dict` are
+    not affected by this utility function.
+
+    Parameters
+    ----------
+    in_dict : dict
+
+    Returns
+    -------
+    out_dict : dict
+    """
+    out_dict = {}
+    for k, v in in_dict.items():
+        if isinstance(v, dict):
+            out_dict.update({k: _recursive_detach(v)})
+        elif callable(getattr(v, 'detach', None)):
+            out_dict.update({k: v.detach()})
+        else:
+            out_dict.update({k: v})
+        return out_dict
