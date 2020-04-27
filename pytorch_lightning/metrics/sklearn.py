@@ -382,6 +382,7 @@ class Precision(SklearnMetric):
     The best value is 1 and the worst value is 0.
 
     """
+
     def __init__(self, labels: Optional[Sequence] = None,
                  pos_label: Union[str, int] = 1,
                  average: Optional[str] = 'binary',
@@ -539,13 +540,13 @@ class PrecisionRecallCurve(SklearnMetric):
     """
 
     def __init__(self,
-                 pos_labels: Union[str, int] = 1,
+                 pos_label: Union[str, int] = 1,
                  reduce_group: Any = torch.distributed.group.WORLD,
                  reduce_op: Any = torch.distributed.ReduceOp.SUM):
         """
 
         Args:
-            pos_labels: The class to report if ``average='binary'``.
+            pos_label: The class to report if ``average='binary'``.
             reduce_group: the process group for DDP reduces (only needed for DDP training).
                 Defaults to all processes (world)
             reduce_op: the operation to perform during reduction within DDP (only needed for DDP training).
@@ -554,7 +555,7 @@ class PrecisionRecallCurve(SklearnMetric):
         super().__init__('precision_recall_curve',
                          reduce_group=reduce_group,
                          reduce_op=reduce_op,
-                         pos_labels=pos_labels)
+                         pos_label=pos_label)
 
     def forward(self, probas_pred: np.ndarray, y_true: np.ndarray,
                 sample_weight: Optional[np.ndarray] = None) -> Union[np.ndarray, float]:
@@ -578,7 +579,10 @@ class PrecisionRecallCurve(SklearnMetric):
                 precision and recall.
 
         """
-        return super().forward(probas_pred=probas_pred, y_true=y_true, sample_weight=sample_weight)
+        # only return x and y here, since for now we cannot auto-convert elements of multiple length.
+        # Will be fixed in native implementation
+        return np.array(
+            super().forward(probas_pred=probas_pred, y_true=y_true, sample_weight=sample_weight)[:2])
 
 
 class ROC(SklearnMetric):
@@ -636,7 +640,7 @@ class ROC(SklearnMetric):
                 and is arbitrarily set to `max(y_score) + 1`.
 
         """
-        return super().forward(y_score=y_score, y_true=y_true, sample_weight=sample_weight)
+        return np.array(super().forward(y_score=y_score, y_true=y_true, sample_weight=sample_weight)[:2])
 
 
 class AUROC(SklearnMetric):
@@ -646,6 +650,7 @@ class AUROC(SklearnMetric):
         this implementation is restricted to the binary classification task
         or multilabel classification task in label indicator format.
     """
+
     def __init__(self, average: Optional[str] = 'macro',
                  reduce_group: Any = torch.distributed.group.WORLD,
                  reduce_op: Any = torch.distributed.ReduceOp.SUM
