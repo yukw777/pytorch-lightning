@@ -380,6 +380,7 @@ class TrainerDDPMixin(ABC):
         """
         if self.proc_rank == 0:
             path = os.path.join(self.default_root_dir, '__temp_weight_ddp_end.ckpt')
+            print('saving ckpt', path)
             self.save_checkpoint(path)
 
     def load_spawn_weights(self, original_model):

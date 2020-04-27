@@ -251,7 +251,9 @@ class TrainerIOMixin(ABC):
             # do the actual save
             try:
                 self._atomic_save(checkpoint, filepath)
+                print('checkpoint saved', filepath)
             except AttributeError:
+                print('error')
                 if 'hparams' in checkpoint:
                     del checkpoint['hparams']
 
