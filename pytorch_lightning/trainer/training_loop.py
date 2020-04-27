@@ -145,6 +145,7 @@ from abc import ABC, abstractmethod
 from typing import Callable
 from typing import Union, List
 import atexit
+import signal
 
 import numpy as np
 from torch.utils.data import DataLoader
@@ -302,6 +303,12 @@ class TrainerTrainLoopMixin(ABC):
     def train(self):
         rank_zero_warn('Displayed epoch numbers in the progress bar start from "1" until v0.6.x,'
                        ' but will start from "0" in v0.8.0.', RuntimeWarning)
+      
+        # add signal handlers for process kills
+        orig_signal_handlers = {}
+        sig_names = ['SIGTERM', 'SIGKILL', 'SIGSEGV', 'SIGINT']
+        for sig_name in sig_names:
+            orig_singal_handlers[signame] = signal.signal(getattr(signal, sig_name), self.run_training_teardown)
 
         # get model
         model = self.get_model()
@@ -372,6 +379,10 @@ class TrainerTrainLoopMixin(ABC):
                             return
 
             self.run_training_teardown()
+            
+            # reset signal handlers
+            for sig_name in sig_names:
+              signal.signal(getattr(signal, sig_name), orig_signal_handlers[sig_name])
 
         except KeyboardInterrupt:
             if self.proc_rank == 0:
