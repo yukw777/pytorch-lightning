@@ -4,15 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
-## [unreleased] - YYYY-MM-DD
-
-### Added
+## [0.7.5] - 2020-04-27
 
 ### Changed
  
-- Allow logging of metrics togther with hparams ([#1630](https://github.com/PyTorchLightning/pytorch-lightning/pull/1630))
-
-### Deprecated
+- Allow logging of metrics together with `hparams` ([#1630](https://github.com/PyTorchLightning/pytorch-lightning/pull/1630))
+- Allow metrics logged together with hparams ([#1630](https://github.com/PyTorchLightning/pytorch-lightning/pull/1630))
 
 ### Removed
 
@@ -20,6 +17,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Fixed ModelCheckpoint not being fixable ([#1632](https://github.com/PyTorchLightning/pytorch-lightning/pull/1632))
+- Fixed CPU DDP breaking change and DDP change ([#1635](https://github.com/PyTorchLightning/pytorch-lightning/pull/1635))
+- Tested pickling ([#1636](https://github.com/PyTorchLightning/pytorch-lightning/pull/1636))
 - Run graceful training teardown on interpreter exit ([#1631](https://github.com/PyTorchLightning/pytorch-lightning/pull/1631))
 
 
