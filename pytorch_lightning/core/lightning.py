@@ -1708,9 +1708,13 @@ class LightningModule(ABC, DeviceDtypeModuleMixin, GradInformation, ModelIO, Mod
         1. we don't overwrite the property if it already exists
         2. we also store a module_arguments property for model loading and saving
         """
-        # two frames back is the init of the child module
+        # start from the current frame, and trace back until the next frame is no longer `__init__()`
+        # since that means we've reached the leaf
         frame = inspect.currentframe()
-        frame_args = frame.f_back.f_back.f_locals
+        while frame.f_back.f_code.co_name == '__init__':
+            frame = frame.f_back
+
+        frame_args = frame.f_locals
 
         # we'll save hparams automatically (renamed to module_arguments)
         module_arguments = {}
